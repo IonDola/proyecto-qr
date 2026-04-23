@@ -1,0 +1,358 @@
+@startuml QR-NET Class Diagram
+
+!theme plain
+skinparam backgroundColor #0D1117
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 11
+skinparam defaultFontColor #E6EDF3
+
+skinparam class {
+    BackgroundColor #161B22
+    BorderColor #30363D
+    HeaderBackgroundColor #1F4068
+    FontColor #E6EDF3
+    AttributeFontColor #8B949E
+    StereotypeFontColor #58A6FF
+}
+
+skinparam interface {
+    BackgroundColor #1A1A2E
+    BorderColor #58A6FF
+    FontColor #58A6FF
+}
+
+skinparam arrow {
+    Color #58A6FF
+    FontColor #ffffff
+    FontSize 9
+}
+
+skinparam note {
+    BackgroundColor #2D2D0F
+    BorderColor #8B7000
+    FontColor #E6EDF3
+}
+
+' ─────────────────────────────────────────
+' INTERFAZ ABSTRACTA — CANAL
+' ─────────────────────────────────────────
+
+package "Canal Abstracto" #1A1A2E {
+
+    interface NetworkAdapter <<interface>> {
+        + send(data : bytes)    : bool
+        + receive()             : bytes | None
+        + is_available()        : bool
+        + get_mac()             : bytes[6]
+        + get_type()            : AdapterType
+        + get_cost()            : int
+    }
+
+    enum AdapterType {
+        QR_LIGHT
+        ETHERNET
+        WIFI
+        VIDEO_STREAM
+    }
+
+    class AdapterSelector <<Channel Selector>> {
+        - adapters      : list[NetworkAdapter]
+        - policy        : SelectionPolicy
+        --
+        + select(dst : bytes) : NetworkAdapter
+        - score(a : NetworkAdapter, dst : bytes) : int
+        - is_qr_required(dst : bytes) : bool
+        - fallback()          : NetworkAdapter
+    }
+
+    enum SelectionPolicy {
+        PREFER_QR
+        PREFER_TCP
+        LOWEST_COST
+        FIRST_AVAILABLE
+    }
+}
+
+note top of AdapterSelector
+  **Responsable de elegir el canal.**
+  select() evalúa cada adaptador
+  con score() según:
+  · disponibilidad (is_available)
+  · costo del salto (get_cost)
+  · política activa (policy)
+  · si el destino es inter-ciudad
+    → fuerza QR (is_qr_required)
+  Devuelve el NetworkAdapter
+  ganador para ese paquete.
+end note
+
+note right of AdapterType
+  QR_LIGHT    → DispositivoLuzAdaptador
+  ETHERNET    → TCPAdapter (eth0)
+  WIFI        → TCPAdapter (wlan0)
+  VIDEO_STREAM→ VideoAdapter (Zoom/Meet)
+end note
+
+' ─────────────────────────────────────────
+' CAPA 1 — IMPLEMENTACIONES DE CANAL
+' ─────────────────────────────────────────
+
+package "Capa 1 — Implementaciones de Canal" #524328 {
+
+    class DispositivoLuzAdaptador <<QR · Light Channel>> {
+        - version       : uint8
+        - mac_address   : bytes[6]
+        - palette       : ColorPalette
+        - camera        : CameraInterface
+        - negotiated    : HandshakeFrame
+        - send_interval : int
+        --
+        + send(data : bytes)            : bool
+        + receive()                     : bytes | None
+        + is_available()                : bool
+        + get_mac()                     : bytes[6]
+        + get_type()                    : AdapterType
+        + get_cost()                    : int
+        + handshake()                   : bool
+        + encode_qr(f : DataFrame)      : Image
+        + decode_qr(img : Image)        : DataFrame
+        + retransmit(seq : int)         : void
+    }
+
+    class TCPAdapter <<Ethernet / WiFi Channel>> {
+        - mac_address   : bytes[6]
+        - interface     : str
+        - socket        : Socket
+        - peer_ip       : str
+        - peer_port     : int
+        --
+        + send(data : bytes)    : bool
+        + receive()             : bytes | None
+        + is_available()        : bool
+        + get_mac()             : bytes[6]
+        + get_type()            : AdapterType
+        + get_cost()            : int
+        + connect()             : bool
+        + disconnect()          : void
+    }
+
+    class VideoAdapter <<Zoom / Meet · Stream Channel>> {
+        - mac_address   : bytes[6]
+        - stream_url    : str
+        - capture       : CameraInterface
+        - display       : ScreenInterface
+        --
+        + send(data : bytes)    : bool
+        + receive()             : bytes | None
+        + is_available()        : bool
+        + get_mac()             : bytes[6]
+        + get_type()            : AdapterType
+        + get_cost()            : int
+        + encode_frame(data)    : Image
+        + decode_frame(img)     : bytes
+    }
+
+    class HandshakeFrame <<QR #0 · Negotiation>> {
+        - version       : uint8
+        - frame_type    : uint4
+        - magic         : uint16
+        - src_mac       : bytes[6]
+        - dst_mac       : bytes[6]
+        - color_depth   : uint2
+        - qr_version    : uint6
+        - ecc_level     : uint2
+        - sync_method   : uint2
+        - interval_ms   : uint16
+        - total_frames  : uint32
+        - file_size     : uint64
+        - file_hash     : bytes[16]
+        - checksum      : uint16
+        --
+        + to_bytes()    : bytes
+        + from_bytes(b) : HandshakeFrame
+        + verify()      : bool
+    }
+
+    class DataFrame <<DATA / NACK / FIN>> {
+        - version       : uint8
+        - frame_type    : uint4
+        - src_mac       : bytes[6]
+        - dst_mac       : bytes[6]
+        - seq_num       : uint16
+        - payload_len   : uint8
+        - payload       : bytes[≤112]
+        - checksum      : uint16
+        --
+        + to_bytes()    : bytes
+        + from_bytes(b) : DataFrame
+        + verify()      : bool
+    }
+
+    class ColorPalette <<Utility · Color Negotiation>> {
+        - colors        : list[RGB]
+        - bits_per_cell : int
+        - ref_patch     : RGB
+        --
+        + encode(nibble : int)   : RGB
+        + decode(color  : RGB)   : int
+        + calibrate(ref : Image) : void
+        + best_depth(cam)        : int
+    }
+
+    class CameraInterface <<Utility · Physical I/O>> {
+        - device_id  : int
+        - resolution : tuple[int, int]
+        - fps        : float
+        --
+        + capture()       : Image
+        + detect_change() : bool
+        + open()          : void
+        + close()         : void
+    }
+}
+
+' ─────────────────────────────────────────
+' CAPA 2/3 — RED
+' ─────────────────────────────────────────
+
+package "Capa 2/3 — Red (remote-QR-net)" #1B3A2A{
+
+    class Packet <<Network Packet>> {
+        - version     : uint8
+        - src_id      : bytes[16]
+        - dst_id      : bytes[16]
+        - ttl         : uint8
+        - circuit_id  : uint32
+        - payload_len : uint16
+        - payload     : bytes
+        - checksum    : uint32
+        --
+        + to_bytes()    : bytes
+        + from_bytes(b) : Packet
+        + verify()      : bool
+    }
+
+    class QRNetNode <<Mesh Node>> {
+        - node_id       : bytes[16]
+        - routing_table : dict
+        - selector      : AdapterSelector
+        - circuit_table : dict
+        --
+        + join_mesh()                   : void
+        + route_packet(pkt : Packet)    : void
+        + discover_peers()              : list[NodeInfo]
+        + send_anonymous(msg, dst)      : void
+        + negotiate_circuit(dst)        : uint32
+    }
+
+    class NodeDirectory <<Node Registry>> {
+        - nodes : dict[id, NodeInfo]
+        --
+        + register(node : NodeInfo) : void
+        + lookup(id : bytes)        : NodeInfo
+        + broadcast()               : void
+        + expire_stale()            : void
+    }
+}
+
+' ─────────────────────────────────────────
+' CAPA 7 — APLICACIÓN
+' ─────────────────────────────────────────
+
+package "Capa 7 — Aplicación" #3D1F1F {
+
+    class Message <<Message Entity>> {
+        - id        : uuid
+        - topic     : str
+        - content   : str
+        - timestamp : int
+        - is_public : bool
+        - signature : bytes
+        --
+        + encrypt()    : bytes
+        + decrypt(key) : str
+        + sign(key)    : void
+    }
+
+    class AnonChatApp <<Anonymous App>> {
+        - node     : QRNetNode
+        - identity : EphemeralID
+        --
+        + post(msg : str, topic : str) : void
+        + read(topic : str)            : list[str]
+        + follow(topic : str)          : void
+    }
+
+    class ClearnetBridge <<IRC / NNTP Bridge>> {
+        - irc_server  : str
+        - nntp_server : str
+        - bot_nick    : str
+        --
+        + relay_public(msg : Message) : void
+        + publish_topic(topic : str)  : void
+        + connect_irc()               : void
+        + connect_nntp()              : void
+    }
+}
+
+"Message" -[hidden]down- "Capa 2/3 — Red (remote-QR-net)"
+' ─────────────────────────────────────────
+' RELACIONES
+' ─────────────────────────────────────────
+
+' Herencia de interfaz
+DispositivoLuzAdaptador  ..|> NetworkAdapter : implements
+TCPAdapter               ..|> NetworkAdapter : implements
+VideoAdapter             ..|> NetworkAdapter : implements
+
+' AdapterSelector gestiona los adaptadores
+AdapterSelector o-- NetworkAdapter  : evalúa
+AdapterSelector --> SelectionPolicy : usa
+NetworkAdapter  --> AdapterType     : retorna
+
+' Capa 1 interna — LuzAdaptador
+DispositivoLuzAdaptador *-- ColorPalette    : compone
+DispositivoLuzAdaptador *-- CameraInterface : compone
+DispositivoLuzAdaptador ..> HandshakeFrame  : crea / usa
+DispositivoLuzAdaptador ..> DataFrame       : crea / usa
+
+' VideoAdapter también usa cámara
+VideoAdapter ..> CameraInterface            : usa
+
+' Capa 2/3
+QRNetNode *-- AdapterSelector  : delega selección de canal
+QRNetNode ..> Packet           : crea
+QRNetNode --> NodeDirectory    : consulta
+
+' Capa 7
+AnonChatApp --> QRNetNode      : usa
+AnonChatApp ..> Message        : crea
+ClearnetBridge ..> Message     : retransmite (públicos)
+
+' ─────────────────────────────────────────
+' NOTAS
+' ─────────────────────────────────────────
+
+note right of QRNetNode
+  route_packet() llama a
+  selector.select(dst) para
+  obtener el canal correcto
+  antes de enviar cada paquete.
+end note
+
+note bottom of HandshakeFrame
+  **QR #0** — Único frame de negociación.
+  Viaja antes de cualquier dato.
+  Negocia: COLOR_DEPTH, INTERVAL_MS,
+  TOTAL_FRAMES, FILE_SIZE, FILE_HASH.
+end note
+
+note bottom of ColorPalette
+  COLOR_DEPTH negociado:
+  00 → 2 colores  (1 bit/celda)
+  01 → 4 colores  (2 bits/celda)
+  10 → 8 colores  (3 bits/celda)
+  11 → 16 colores (4 bits/celda) ← objetivo
+end note
+
+@enduml
