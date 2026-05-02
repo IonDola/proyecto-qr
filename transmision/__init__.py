@@ -8,13 +8,13 @@ from .interfaces import (
     IAdapterSelector,
 )
 from .frames import HandshakeFrame, DataFrame
-from .color_palette import ColorPalette
-from .camera import OpenCVCamera
-from .grid import Grid64Codec
-from .compression import ZstdCompressor
-from .fifo_queue import FifoFrameQueue
-from .adaptador import DispositivoLuzAdaptador
-from .selector import AdapterSelector
+from .adapter import DispositivoLuzAdaptador
+from .implementation.color_palette import ColorPalette
+from .implementation.camera import OpenCVCamera
+from .implementation.grid import Grid64Codec
+from .implementation.compressor import ZstdCompressor
+from .implementation.queue import FifoFrameQueue
+from .implementation.selector import AdapterSelector
 
 __all__ = [
     "IColorCodec", "ICameraInterface", "IGridCodec", "ICompressor",

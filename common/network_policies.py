@@ -43,5 +43,5 @@ class FrameType(IntEnum):
     # Datos
     DATA    = 0x3
     NACK    = 0x4
-    END     = 0x5
-    END_ACK = 0x6
+    FIN     = 0x5
+    FIN_ACK = 0x6

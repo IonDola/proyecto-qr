@@ -12,7 +12,8 @@ import numpy as np
 
 if TYPE_CHECKING:
     from .frames import HandshakeFrame, DataFrame
-    from common.types import RGB, AdapterType, SelectionPolicy
+    from common.other import RGB
+    from common.network_policies import AdapterType, SelectionPolicy
 
 
 # ── Color ─────────────────────────────────────────────────────────────────────
@@ -151,8 +152,8 @@ class ICompressor(ABC):
 
     @property
     @abstractmethod
-    def algo(self):
-        """CompressionAlgo que implementa esta clase."""
+    def compression_algorithm(self):
+        """CompressionAlgorithm que implementa esta clase."""
 
 
 # ── Cola FIFO ─────────────────────────────────────────────────────────────────

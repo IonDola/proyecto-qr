@@ -11,7 +11,8 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
-from common.types import FrameType, CompressionMode
+from common.other import CompressionAlgorithm
+from common.network_policies import FrameType
 from common.exceptions import ChecksumError
 from common.checksum import crc16
 
@@ -56,7 +57,7 @@ class HandshakeFrame:
     ecc_level:    int           = 2      # 0=L 1=M 2=Q 3=H
     sync_method:  int           = 3      # 0=timer 1=visual 2=tick 3=híbrido
     interval_ms:  int           = 150    # ms entre frames
-    compression:  CompressionMode = CompressionMode.ZSTD
+    compression:  CompressionAlgorithm = CompressionAlgorithm.ZSTD
     # Metadatos del archivo
     total_frames: int           = 0
     file_size:    int           = 0
@@ -118,7 +119,7 @@ class HandshakeFrame:
             ecc_level    = (ecc_sync >> 6) & 0x3,
             sync_method  = (ecc_sync >> 4) & 0x3,
             interval_ms  = interval,
-            compression  = CompressionAlgo((comp_byte >> 4) & 0xF),
+            compression  = CompressionAlgorithm((comp_byte >> 4) & 0xF),
             total_frames = total,
             file_size    = fsize,
             file_hash    = fhash,
@@ -249,10 +250,10 @@ class DataFrame:
         )
 
     @classmethod
-    def end(cls, src_mac: bytes, dst_mac: bytes, seq: int) -> DataFrame:
-        """Factory: crea un frame END para cerrar la sesión."""
+    def fin(cls, src_mac: bytes, dst_mac: bytes, seq: int) -> DataFrame:
+        """Factory: crea un frame FIN para cerrar la sesión."""
         return cls(
-            frame_type = FrameType.END,
+            frame_type = FrameType.FIN,
             src_mac    = src_mac,
             dst_mac    = dst_mac,
             seq_num    = seq,
