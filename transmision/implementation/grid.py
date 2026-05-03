@@ -244,8 +244,10 @@ class Grid64Codec(IGridCodec):
         bits = [(info >> i) & 1 for i in range(23, -1, -1)]
         positions = [(8, c) for c in range(9, 9 + 24)]
         for (r, c), bit in zip(positions, bits):
+            # Negro=módulo 1, Blanco=módulo 0. bgr=True por defecto → (B,G,R)
+            # Como el color es neutro (gris extremo) B==G==R, no importa el orden
             color = (0, 0, 0) if bit else (255, 255, 255)
-            self._draw_module(img, r, c, color, bgr=False)
+            self._draw_module(img, r, c, color)
 
     # ── lectura de la grilla ──────────────────────────────────────────────────
 
@@ -295,7 +297,9 @@ class Grid64Codec(IGridCodec):
         patch = np.zeros((CAL_SIZE, CAL_SIZE, 3), dtype=np.uint8)
         for dr in range(CAL_SIZE):
             for dc in range(CAL_SIZE):
-                patch[dr, dc] = self._read_module_color(aligned, r0 + dr, c0 + dc)
+                r_val, g_val, b_val = self._read_module_color(aligned, r0 + dr, c0 + dc)
+                # _read_module_color retorna RGB; calibrate() espera BGR (formato OpenCV)
+                patch[dr, dc] = (b_val, g_val, r_val)
         return patch
 
     def _read_module_color(
@@ -321,15 +325,16 @@ class Grid64Codec(IGridCodec):
         bits = []
         for (r, c) in positions:
             r_val, g_val, b_val = self._read_module_color(aligned, r, c)
+            # _read_module_color retorna RGB; luminancia estándar
             lum = 0.299 * r_val + 0.587 * g_val + 0.114 * b_val
-            bits.append(0 if lum < 128 else 1)
+            bits.append(1 if lum < 128 else 0)
 
         info = 0
         for bit in bits:
             info = (info << 1) | bit
 
         payload_len = (info >> 4) & 0xFFFFF
-        bpc = ((info >> 2) & 0x3) + 1
+        bpc = (info & 0x3) + 1
         return payload_len, bpc
 
 

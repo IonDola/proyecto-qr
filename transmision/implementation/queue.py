@@ -134,6 +134,11 @@ class FifoFrameQueue(IFrameQueue):
 # ── utilidad ──────────────────────────────────────────────────────────────────
 
 def _fast_hash(frame: np.ndarray) -> int:
+    """
+    Hash rápido de un frame numpy.
+    Downsamplea a 64×64 antes de hashear para que pequeñas diferencias
+    de compresión no generen hashes distintos en el mismo QR.
+    """
     step_y = max(1, frame.shape[0] // 64)
     step_x = max(1, frame.shape[1] // 64)
     small = frame[::step_y, ::step_x]
