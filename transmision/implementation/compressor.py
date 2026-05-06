@@ -16,7 +16,7 @@ import zstandard as zstd
 
 from common.other import CompressionAlgorithm
 from common.exceptions import CompressionError, DecompressionError
-from ..interfaces import ICompressor
+from transmision.interfaces import ICompressor
 
 # Tamaño de chunk para el streaming (64 KB — balance entre latencia y ratio)
 CHUNK_SIZE = 64 * 1024

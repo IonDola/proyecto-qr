@@ -5,7 +5,7 @@ Implementación de IColorCodec con 16 colores separados en espacio HSV.
 Diseño:
 - 16 colores equidistantes en el eje Hue (22.5° de separación).
 - Saturation=0.85, Value=0.90 fijos → colores vivos y distinguibles.
-- Calibración dinámica desde el parche de referencia 4x4 en cada frame.
+- Calibración dinámica desde el parche de referencia 4×4 en cada frame.
 - Decodificación por distancia mínima en espacio HSV (más robusto que RGB
   ante variaciones de iluminación).
 """
@@ -17,7 +17,7 @@ from typing import ClassVar
 import numpy as np
 
 from common.other import RGB
-from ..interfaces import IColorCodec
+from transmision.interfaces import IColorCodec
 
 
 class ColorPalette(IColorCodec):
@@ -93,6 +93,33 @@ class ColorPalette(IColorCodec):
         return self._n_colors
 
     # ── helpers públicos ──────────────────────────────────────────────────────
+
+    @classmethod
+    def from_negotiated(cls, path: str) -> "ColorPalette":
+        """
+        Construye una ColorPalette desde paleta_negociada.json
+        generado por negotiation_session.py.
+        """
+        import json, math
+        with open(path) as f:
+            data = json.load(f)
+        colors_rgb = [tuple(c) for c in data["palette_rgb"]]
+        return cls.from_rgb_list(colors_rgb)
+
+    @classmethod
+    def from_rgb_list(cls, colors: list) -> "ColorPalette":
+        """
+        Construye una ColorPalette desde una lista de colores RGB explícita.
+        Trunca a la potencia de 2 más cercana por debajo.
+        """
+        valid_ns = [2, 4, 8, 16]
+        n = len(colors)
+        n_used = max(v for v in valid_ns if v <= n) if n >= 2 else 2
+        instance = cls.__new__(cls)
+        instance._n_colors   = n_used
+        instance._palette    = [tuple(c) for c in colors[:n_used]]
+        instance._calibrated = [tuple(c) for c in colors[:n_used]]
+        return instance
 
     def reset_calibration(self) -> None:
         """Restaura la paleta calibrada a los valores teóricos originales."""

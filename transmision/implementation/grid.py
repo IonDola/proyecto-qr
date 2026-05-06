@@ -54,6 +54,8 @@ class Grid64Codec(IGridCodec):
 
     def __init__(self, module_px: int = MODULE_PX) -> None:
         self._module_px = module_px
+        # Recalcular _img_side con el module_px de instancia
+        self._img_side = (GRID_MODULES + 2 * SILENCE_MODULES) * module_px
         # Máscara booleana: True = módulo disponible para payload
         self._payload_mask: np.ndarray = self._build_payload_mask()
         self._payload_positions: list[tuple[int, int]] = [
@@ -79,7 +81,7 @@ class Grid64Codec(IGridCodec):
         symbols = _bytes_to_symbols(payload, bpc)
 
         # Crear imagen base blanca (zona de silencio = blanco)
-        img = np.ones((_IMG_SIDE, _IMG_SIDE, 3), dtype=np.uint8) * 255
+        img = np.ones((self._img_side, self._img_side, 3), dtype=np.uint8) * 255
 
         # Rellenar módulos de payload
         sym_iter = iter(symbols)
@@ -130,7 +132,7 @@ class Grid64Codec(IGridCodec):
 
     @property
     def grid_px(self) -> int:
-        return _IMG_SIDE
+        return self._img_side
 
     def max_payload_bytes_for(self, codec: IColorCodec) -> int:
         return self.max_payload_bytes_for_bpc(codec.bits_per_cell)
@@ -253,33 +255,94 @@ class Grid64Codec(IGridCodec):
 
     def _align_grid(self, image: np.ndarray) -> np.ndarray | None:
         """
-        Detecta y alinea la grilla en la imagen capturada usando
-        los finder patterns como referencia.
-        Retorna la imagen recortada y perspectiva-corregida, o None.
+        Detecta y alinea la grilla en la imagen capturada.
+
+        Pipeline de preprocesamiento para imágenes de cámara real:
+          1. Escalar a ancho fijo para normalizar resolución
+          2. Blur gaussiano para eliminar ruido de pantalla (efecto moiré)
+          3. Umbralización adaptativa (más robusta que Otsu para pantallas)
+          4. Buscar el contorno cuadrilátero más grande
+          5. Corrección de perspectiva
         """
+        h, w = image.shape[:2]
+
+        # 1. Escalar si la imagen es muy grande (normaliza la detección)
+        scale = 1.0
+        if w > 1280:
+            scale = 1280 / w
+            image = cv2.resize(image, (1280, int(h * scale)))
+
+        # 2. Blur gaussiano para suavizar el patrón de pantalla (moiré)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        contours, _ = cv2.findContours(
-            cv2.bitwise_not(binary), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # 3. Umbralización adaptativa — más robusta que Otsu para pantallas
+        #    con iluminación no uniforme o reflexión
+        binary_adapt = cv2.adaptiveThreshold(
+            gray, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            blockSize=31,   # tamaño del vecindario (debe ser impar)
+            C=8,            # constante restada — ajusta contraste local
         )
-        if not contours:
+        # También intentar con Otsu como fallback
+        _, binary_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        quad = None
+        for binary in (binary_adapt, binary_otsu):
+            # Operaciones morfológicas para cerrar huecos en bordes
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            closed = cv2.morphologyEx(cv2.bitwise_not(binary), cv2.MORPH_CLOSE, kernel)
+
+            contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                continue
+
+            contours = sorted(contours, key=cv2.contourArea, reverse=True)
+            img_area = image.shape[0] * image.shape[1]
+
+            for cnt in contours[:8]:
+                area = cv2.contourArea(cnt)
+                # Ignorar contornos demasiado pequeños o demasiado grandes
+                if area < img_area * 0.02 or area > img_area * 0.98:
+                    continue
+                peri = cv2.arcLength(cnt, True)
+                approx = cv2.approxPolyDP(cnt, 0.03 * peri, True)
+                if len(approx) == 4:
+                    # Verificar que el contorno es aproximadamente cuadrado
+                    # (aspect ratio entre 0.5 y 2.0) para evitar falsos positivos
+                    x_, y_, w_, h_ = cv2.boundingRect(approx)
+                    if h_ == 0:
+                        continue
+                    ratio = w_ / h_
+                    if not (0.5 < ratio < 2.0):
+                        continue
+                    # Verificar que el área del cuadrilátero es razonable
+                    # respecto a su bounding box (convexidad mínima)
+                    quad_area = cv2.contourArea(approx)
+                    bbox_area = w_ * h_
+                    if quad_area < bbox_area * 0.6:
+                        continue
+                    quad = approx.reshape(4, 2)
+                    break
+            if quad is not None:
+                break
+
+        if quad is None:
             return None
 
-        # Heurística: el contorno más grande que se aproxima a un cuadrado
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)
-        for cnt in contours[:5]:
-            peri = cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-            if len(approx) == 4:
-                return self._perspective_correct(image, approx.reshape(4, 2))
+        # Desescalar si habíamos reducido la imagen
+        if scale != 1.0:
+            quad = (quad / scale).astype(np.float32)
 
-        return None
+        return self._perspective_correct(image if scale == 1.0 else
+                                         cv2.resize(image, (w, h)), quad)
 
     def _perspective_correct(
         self, image: np.ndarray, corners: np.ndarray
     ) -> np.ndarray:
         """Corrige perspectiva de la grilla usando los 4 vértices detectados."""
-        dst_size = _IMG_SIDE
+        dst_size = self._img_side
         dst_pts = np.array([
             [0, 0], [dst_size - 1, 0],
             [dst_size - 1, dst_size - 1], [0, dst_size - 1],
@@ -378,13 +441,22 @@ def _symbols_to_bytes(symbols: list[int], bpc: int, length: int) -> bytes:
 
 def _order_corners(pts: np.ndarray) -> np.ndarray:
     """
-    Ordena 4 puntos en: sup-izq, sup-der, inf-der, inf-izq.
+    Ordena 4 puntos de forma estable en: sup-izq, sup-der, inf-der, inf-izq.
+
+    Método basado en suma y diferencia de coordenadas — no depende de
+    ángulos (que son inestables cuando los puntos están casi alineados):
+      sup-izq → menor x+y
+      inf-der → mayor x+y
+      sup-der → menor y-x
+      inf-izq → mayor y-x
     """
-    center = pts.mean(axis=0)
-    angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
-    order = np.argsort(angles)
-    pts = pts[order]
-    # rotar para que sup-izq sea primero
-    top = pts[np.argmin(pts[:, 1])]
-    idx = np.where((pts == top).all(axis=1))[0][0]
-    return np.roll(pts, -idx, axis=0)
+    pts = pts.astype(np.float32)
+    s = pts.sum(axis=1)      # x + y
+    d = np.diff(pts, axis=1).flatten()  # y - x
+
+    ordered = np.zeros((4, 2), dtype=np.float32)
+    ordered[0] = pts[np.argmin(s)]   # sup-izq: menor suma
+    ordered[2] = pts[np.argmax(s)]   # inf-der: mayor suma
+    ordered[1] = pts[np.argmin(d)]   # sup-der: menor diferencia
+    ordered[3] = pts[np.argmax(d)]   # inf-izq: mayor diferencia
+    return ordered

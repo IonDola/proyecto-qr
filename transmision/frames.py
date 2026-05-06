@@ -1,4 +1,5 @@
 """
+capa1/frames.py
 Estructuras de datos para los frames de Capa 1.
 
 HandshakeFrame — QR #0, negocia capacidades antes de transmitir datos.
@@ -11,8 +12,12 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
-from common.other import CompressionAlgorithm
+import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 from common.network_policies import FrameType
+from common.other import CompressionAlgorithm
 from common.exceptions import ChecksumError
 from common.checksum import crc16
 
@@ -25,10 +30,10 @@ PROTOCOL_VERSION: int = 0x1  # versión actual del protocolo
 # ── HandshakeFrame ────────────────────────────────────────────────────────────
 #
 # Layout (big-endian):
-#   VERSION(4b) | FRAME_TYPE(4b) | MAGIC(16b)          = 3 bytes
+#   VERSION(4b) | FRAME_TYPE(4b) | MAGIC(16b)         = 3 bytes
 #   SRC_MAC(48b)                                       = 6 bytes
 #   DST_MAC(48b)                                       = 6 bytes
-#   CD(2b) | GRID(6b) | ECC(2b) | SYNC(2b) | RSVD(4b)  = 2 bytes
+#   CD(2b) | GRID(6b) | ECC(2b) | SYNC(2b) | RSVD(4b) = 2 bytes
 #   FRAME_INTERVAL_MS(16b)                             = 2 bytes
 #   COMP(4b) | RSVD(4b)                                = 1 byte
 #   RSVD(7b)                                           = 1 byte (alineación)
@@ -36,7 +41,7 @@ PROTOCOL_VERSION: int = 0x1  # versión actual del protocolo
 #   FILE_SIZE(64b)                                     = 8 bytes
 #   FILE_HASH(128b)                                    = 16 bytes
 #   RSVD(8b) | CHECKSUM(16b)                           = 3 bytes
-#                                                TOTAL = 52 bytes
+#                                               TOTAL = 52 bytes
 
 _HS_STRUCT = struct.Struct(">B B H 6s 6s B H B B I Q 16s B H")
 #             ver_ftype magic src dst cd_grid interval comp rsvd total fsize hash rsvd2 csum
@@ -258,3 +263,133 @@ class DataFrame:
             dst_mac    = dst_mac,
             seq_num    = seq,
         )
+
+# ── Frames de calibración de color ────────────────────────────────────────────
+#
+# CalProbeFrame — el emisor anuncia los colores candidatos que va a mostrar.
+#   Serializado como JSON compacto dentro de un QR estándar (qrcode library).
+#   Campos:
+#     version      : uint8
+#     frame_type   : "CAL_PROBE"
+#     src_mac      : hex string
+#     dst_mac      : hex string
+#     n_candidates : int  — cuántos colores mostrará (16–64)
+#     patch_px     : int  — tamaño de cada patch en px
+#     duration_ms  : int  — cuánto tiempo mostrará cada ronda
+#
+# CalResponseFrame — el receptor responde con los índices que distingue.
+#   También serializado como JSON en QR estándar B/N.
+#   Campos:
+#     version        : uint8
+#     frame_type     : "CAL_RESPONSE"
+#     src_mac        : hex string
+#     dst_mac        : hex string
+#     selected       : list[int]  — índices de colores distinguibles
+#     confusion      : list[list[float]]  — matriz de confusión NxN (N=n_candidates)
+#     recommended_cd : int  — COLOR_DEPTH recomendado (0-3)
+#     interval_ms    : int  — intervalo recomendado entre frames
+#
+# Ambos se transportan como JSON → bytes UTF-8 → QR estándar.
+# El QR estándar B/N se puede leer con pyzbar o cualquier lector de QR.
+
+import json as _json
+
+CAL_PROBE_TYPE    = "CAL_PROBE"
+CAL_RESPONSE_TYPE = "CAL_RESPONSE"
+
+
+@dataclass
+class CalProbeFrame:
+    """
+    Anuncio del emisor antes de mostrar los colores candidatos.
+    Viaja como QR estándar B/N (legible por cualquier dispositivo).
+    """
+    src_mac      : bytes
+    dst_mac      : bytes
+    n_candidates : int   = 32      # colores candidatos a mostrar
+    patch_px     : int   = 120     # tamaño del patch en pantalla
+    duration_ms  : int   = 3000    # ms que se muestra cada ronda de colores
+    version      : int   = PROTOCOL_VERSION
+
+    def to_json(self) -> str:
+        return _json.dumps({
+            "version"      : self.version,
+            "frame_type"   : CAL_PROBE_TYPE,
+            "src_mac"      : self.src_mac.hex(),
+            "dst_mac"      : self.dst_mac.hex(),
+            "n_candidates" : self.n_candidates,
+            "patch_px"     : self.patch_px,
+            "duration_ms"  : self.duration_ms,
+        }, separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, s: str) -> CalProbeFrame:
+        d = _json.loads(s)
+        if d.get("frame_type") != CAL_PROBE_TYPE:
+            raise ValueError(f"frame_type inválido: {d.get('frame_type')}")
+        return cls(
+            version      = d["version"],
+            src_mac      = bytes.fromhex(d["src_mac"]),
+            dst_mac      = bytes.fromhex(d["dst_mac"]),
+            n_candidates = d["n_candidates"],
+            patch_px     = d["patch_px"],
+            duration_ms  = d["duration_ms"],
+        )
+
+
+@dataclass
+class CalResponseFrame:
+    """
+    Respuesta del receptor con los colores que puede distinguir.
+    También viaja como QR estándar B/N.
+    """
+    src_mac        : bytes
+    dst_mac        : bytes
+    selected       : list          # list[int] — índices distinguibles
+    confusion      : list          # list[list[float]] — matriz NxN
+    recommended_cd : int   = 3     # COLOR_DEPTH recomendado
+    interval_ms    : int   = 150
+    version        : int   = PROTOCOL_VERSION
+
+    def to_json(self) -> str:
+        # Redondear matriz a 3 decimales para compactar el QR
+        rounded = [[round(v, 3) for v in row] for row in self.confusion]
+        return _json.dumps({
+            "version"        : self.version,
+            "frame_type"     : CAL_RESPONSE_TYPE,
+            "src_mac"        : self.src_mac.hex(),
+            "dst_mac"        : self.dst_mac.hex(),
+            "selected"       : self.selected,
+            "confusion"      : rounded,
+            "recommended_cd" : self.recommended_cd,
+            "interval_ms"    : self.interval_ms,
+        }, separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, s: str) -> CalResponseFrame:
+        d = _json.loads(s)
+        if d.get("frame_type") != CAL_RESPONSE_TYPE:
+            raise ValueError(f"frame_type inválido: {d.get('frame_type')}")
+        return cls(
+            version        = d["version"],
+            src_mac        = bytes.fromhex(d["src_mac"]),
+            dst_mac        = bytes.fromhex(d["dst_mac"]),
+            selected       = d["selected"],
+            confusion      = d["confusion"],
+            recommended_cd = d["recommended_cd"],
+            interval_ms    = d["interval_ms"],
+        )
+
+    @property
+    def n_usable_colors(self) -> int:
+        """Número de colores seleccionados como distinguibles."""
+        return len(self.selected)
+
+    @property
+    def color_depth(self) -> int:
+        """COLOR_DEPTH efectivo basado en n_usable_colors."""
+        n = self.n_usable_colors
+        if n >= 16: return 3
+        if n >= 8:  return 2
+        if n >= 4:  return 1
+        return 0
