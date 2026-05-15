@@ -86,7 +86,7 @@ class Grid64Codec(IGridCodec):
         # Rellenar módulos de payload
         sym_iter = iter(symbols)
         for (r, c) in self._payload_positions:
-            sym = next(sym_iter, 0)   # 0 = padding si no hay más datos
+            sym = next(sym_iter, 1)   # 0 = padding si no hay más datos
             color = codec.encode(sym)
             self._draw_module(img, r, c, color)
 
@@ -236,123 +236,130 @@ class Grid64Codec(IGridCodec):
 
     def _draw_format_info(self, img: np.ndarray, payload_len: int, bpc: int) -> None:
         """
-        Escribe longitud del payload y bits_per_cell en los módulos de formato.
-        Usa los primeros 24 módulos de la fila/col 8.
-        payload_len: hasta 2^20 ≈ 1 MB por frame (más que suficiente).
-        bpc: 1-4.
+        Escribe longitud del payload y bits_per_cell.
+
+        Layout:
+            bits 23-4 -> payload_len
+            bits 3-2  -> bpc-1
+            bits 1-0  -> reservado/ECC
         """
-        # Empaquetamos 20 bits de longitud + 2 bits de bpc + 2 de ECC simple
-        info = ((payload_len & 0xFFFFF) << 4) | ((bpc - 1) & 0x3)
+
+        info = (
+                ((payload_len & 0xFFFFF) << 4)
+                | (((bpc - 1) & 0x3) << 2)
+        )
+
         bits = [(info >> i) & 1 for i in range(23, -1, -1)]
-        positions = [(8, c) for c in range(9, 9 + 24)]
+
+        # USAR ZONA REALMENTE RESERVADA
+        positions = [(8, c) for c in range(GRID_MODULES - 32, GRID_MODULES - 8)]
+
         for (r, c), bit in zip(positions, bits):
-            # Negro=módulo 1, Blanco=módulo 0. bgr=True por defecto → (B,G,R)
-            # Como el color es neutro (gris extremo) B==G==R, no importa el orden
             color = (0, 0, 0) if bit else (255, 255, 255)
             self._draw_module(img, r, c, color)
 
-    # ── lectura de la grilla ──────────────────────────────────────────────────
-
     def _align_grid(self, image: np.ndarray) -> np.ndarray | None:
-        """
-        Detecta y alinea la grilla en la imagen capturada.
 
-        Pipeline de preprocesamiento para imágenes de cámara real:
-          1. Escalar a ancho fijo para normalizar resolución
-          2. Blur gaussiano para eliminar ruido de pantalla (efecto moiré)
-          3. Umbralización adaptativa (más robusta que Otsu para pantallas)
-          4. Buscar el contorno cuadrilátero más grande
-          5. Corrección de perspectiva
-        """
-        h, w = image.shape[:2]
+        original = image.copy()
 
-        # 1. Escalar si la imagen es muy grande (normaliza la detección)
-        scale = 1.0
-        if w > 1280:
-            scale = 1280 / w
-            image = cv2.resize(image, (1280, int(h * scale)))
-
-        # 2. Blur gaussiano para suavizar el patrón de pantalla (moiré)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Blur suave
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
-        # 3. Umbralización adaptativa — más robusta que Otsu para pantallas
-        #    con iluminación no uniforme o reflexión
-        binary_adapt = cv2.adaptiveThreshold(
-            gray, 255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            blockSize=31,   # tamaño del vecindario (debe ser impar)
-            C=8,            # constante restada — ajusta contraste local
+        # Bordes
+        edges = cv2.Canny(gray, 80, 200)
+
+        # Dilatar un poco para cerrar líneas
+        kernel = np.ones((3, 3), np.uint8)
+        edges = cv2.dilate(edges, kernel, iterations=1)
+
+        contours, _ = cv2.findContours(
+            edges,
+            cv2.RETR_LIST,
+            cv2.CHAIN_APPROX_SIMPLE
         )
-        # También intentar con Otsu como fallback
-        _, binary_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        quad = None
-        for binary in (binary_adapt, binary_otsu):
-            # Operaciones morfológicas para cerrar huecos en bordes
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-            closed = cv2.morphologyEx(cv2.bitwise_not(binary), cv2.MORPH_CLOSE, kernel)
+        img_area = image.shape[0] * image.shape[1]
 
-            contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if not contours:
+        best_quad = None
+        best_area = 0
+
+        debug = image.copy()
+
+        for cnt in contours:
+
+            area = cv2.contourArea(cnt)
+
+            # Filtrar tamaños absurdos
+            if area < img_area * 0.05:
                 continue
 
-            contours = sorted(contours, key=cv2.contourArea, reverse=True)
-            img_area = image.shape[0] * image.shape[1]
+            if area > img_area * 0.80:
+                continue
 
-            for cnt in contours[:8]:
-                area = cv2.contourArea(cnt)
-                # Ignorar contornos demasiado pequeños o demasiado grandes
-                if area < img_area * 0.02 or area > img_area * 0.98:
-                    continue
-                peri = cv2.arcLength(cnt, True)
-                approx = cv2.approxPolyDP(cnt, 0.03 * peri, True)
-                if len(approx) == 4:
-                    # Verificar que el contorno es aproximadamente cuadrado
-                    # (aspect ratio entre 0.5 y 2.0) para evitar falsos positivos
-                    x_, y_, w_, h_ = cv2.boundingRect(approx)
-                    if h_ == 0:
-                        continue
-                    ratio = w_ / h_
-                    if not (0.5 < ratio < 2.0):
-                        continue
-                    # Verificar que el área del cuadrilátero es razonable
-                    # respecto a su bounding box (convexidad mínima)
-                    quad_area = cv2.contourArea(approx)
-                    bbox_area = w_ * h_
-                    if quad_area < bbox_area * 0.6:
-                        continue
-                    quad = approx.reshape(4, 2)
-                    break
-            if quad is not None:
-                break
+            peri = cv2.arcLength(cnt, True)
 
-        if quad is None:
+            approx = cv2.approxPolyDP(
+                cnt,
+                0.02 * peri,
+                True
+            )
+
+            # Solo cuadriláteros
+            if len(approx) != 4:
+                continue
+
+            # Convexo
+            if not cv2.isContourConvex(approx):
+                continue
+
+            approx = approx.reshape(4, 2)
+
+            cv2.drawContours(debug, [approx], -1, (0, 255, 0), 3)
+
+            if area > best_area:
+                best_area = area
+                best_quad = approx
+
+        cv2.imshow("DEBUG CONTOURS", debug)
+
+        if best_quad is None:
             return None
 
-        # Desescalar si habíamos reducido la imagen
-        if scale != 1.0:
-            quad = (quad / scale).astype(np.float32)
-
-        return self._perspective_correct(image if scale == 1.0 else
-                                         cv2.resize(image, (w, h)), quad)
+        return self._perspective_correct(original, best_quad)
 
     def _perspective_correct(
-        self, image: np.ndarray, corners: np.ndarray
+            self,
+            image: np.ndarray,
+            corners: np.ndarray
     ) -> np.ndarray:
-        """Corrige perspectiva de la grilla usando los 4 vértices detectados."""
+
         dst_size = self._img_side
+
         dst_pts = np.array([
-            [0, 0], [dst_size - 1, 0],
-            [dst_size - 1, dst_size - 1], [0, dst_size - 1],
+            [0, 0],
+            [dst_size - 1, 0],
+            [dst_size - 1, dst_size - 1],
+            [0, dst_size - 1],
         ], dtype=np.float32)
 
-        # Ordenar corners: sup-izq, sup-der, inf-der, inf-izq
         src_pts = _order_corners(corners.astype(np.float32))
-        M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-        return cv2.warpPerspective(image, M, (dst_size, dst_size))
 
+        M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+
+        aligned = cv2.warpPerspective(
+            image,
+            M,
+            (dst_size, dst_size),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(255, 255, 255)
+        )
+
+        cv2.imshow("ALIGNED", aligned)
+
+        return aligned
     def _extract_cal_patch(self, aligned: np.ndarray) -> np.ndarray:
         """Extrae el parche de calibración 4×4 de la imagen alineada."""
         r0 = GRID_MODULES - CAL_SIZE
@@ -366,40 +373,53 @@ class Grid64Codec(IGridCodec):
         return patch
 
     def _read_module_color(
-        self, aligned: np.ndarray, row: int, col: int
+            self,
+            aligned: np.ndarray,
+            row: int,
+            col: int
     ) -> tuple[int, int, int]:
         """
-        Lee el color promedio del módulo (row, col) en la imagen alineada.
-        Toma el 50% central del módulo para evitar bordes anti-alias.
+        Lee el color del centro exacto del módulo.
+        Mucho más robusto para QR blanco/negro.
         """
+
         offset = SILENCE_MODULES * self._module_px
+
         y = offset + row * self._module_px
         x = offset + col * self._module_px
-        m = self._module_px
-        pad = m // 4
-        region = aligned[y + pad: y + m - pad, x + pad: x + m - pad]
-        bgr_mean = region.mean(axis=(0, 1)).astype(int)
-        b, g, r = int(bgr_mean[0]), int(bgr_mean[1]), int(bgr_mean[2])
-        return (r, g, b)   # retornamos en RGB
+
+        center_y = y + self._module_px // 2
+        center_x = x + self._module_px // 2
+
+        b, g, r = aligned[center_y, center_x]
+
+        return int(r), int(g), int(b)
 
     def _read_format_info(self, aligned: np.ndarray) -> tuple[int, int]:
-        """Extrae payload_len y bpc desde los módulos de formato."""
-        positions = [(8, c) for c in range(9, 9 + 24)]
+        """
+        Extrae payload_len y bpc desde los módulos de formato.
+        """
+
+        positions = [(8, c) for c in range(GRID_MODULES - 32, GRID_MODULES - 8)]
+
         bits = []
+
         for (r, c) in positions:
             r_val, g_val, b_val = self._read_module_color(aligned, r, c)
-            # _read_module_color retorna RGB; luminancia estándar
+
             lum = 0.299 * r_val + 0.587 * g_val + 0.114 * b_val
+
             bits.append(1 if lum < 128 else 0)
 
         info = 0
+
         for bit in bits:
             info = (info << 1) | bit
 
         payload_len = (info >> 4) & 0xFFFFF
-        bpc = (info & 0x3) + 1
-        return payload_len, bpc
+        bpc = ((info >> 2) & 0x3) + 1
 
+        return payload_len, bpc
 
 # ── utilidades de conversión ──────────────────────────────────────────────────
 

@@ -57,7 +57,7 @@ class HandshakeFrame:
     src_mac:      bytes         = field(default=b'\x00' * 6)
     dst_mac:      bytes         = field(default=b'\xff' * 6)  # broadcast por defecto
     # Capacidades negociadas
-    color_depth:  int           = 3      # 0-3 → 2/4/8/16 colores
+    color_depth:  int           = 0      # 0-3 → 2/4/8/16 colores  (0 = B/N)
     grid_size:    int           = 8      # múltiplo de 8; 8 → 64×64
     ecc_level:    int           = 2      # 0=L 1=M 2=Q 3=H
     sync_method:  int           = 3      # 0=timer 1=visual 2=tick 3=híbrido
@@ -347,7 +347,7 @@ class CalResponseFrame:
     dst_mac        : bytes
     selected       : list          # list[int] — índices distinguibles
     confusion      : list          # list[list[float]] — matriz NxN
-    recommended_cd : int   = 3     # COLOR_DEPTH recomendado
+    recommended_cd : int   = 0     # COLOR_DEPTH recomendado (0 = B/N)
     interval_ms    : int   = 150
     version        : int   = PROTOCOL_VERSION
 

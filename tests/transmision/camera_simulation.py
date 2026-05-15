@@ -36,11 +36,10 @@ NEGOTIATED_FILE = "transmision/negotiation/paleta_negociada.json"
 from transmision.implementation.color_palette import ColorPalette
 from transmision.implementation.grid import Grid64Codec, SILENCE_MODULES
 from transmision.implementation.queue import FifoFrameQueue, DropPolicy
-from transmision.frames import DataFrame, FrameType
 
 # ── configuración ─────────────────────────────────────────────────────────────
 
-CAMERA_ID       = 700       # webcam USB 1280×720 — cambiar a 0 si falla
+CAMERA_ID       = 700     
 N_COLORS        = 2      # color depth inicial (se sobreescribe si hay paleta negociada)
 INTERVAL_MS     = 200     # ms entre frames QR
 FIFO_SIZE       = 32
@@ -150,6 +149,8 @@ def tx_loop(grid: Grid64Codec, running: threading.Event) -> None:
 
         try:
             img = grid.encode_grid(payload, palette)
+            _, bpc_enc = grid._read_format_info(img)  # verificar que encode escribe bien
+            print(f"[DEBUG TX] bpc_escrito={bpc_enc}  palette_bpc={palette.bits_per_cell}")
 
             # Borde negro generoso para separar la grilla del fondo
             border = 40
@@ -164,7 +165,7 @@ def tx_loop(grid: Grid64Codec, running: threading.Event) -> None:
             scaled = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
             # Canvas negro del tamaño exacto del monitor
-            canvas = np.zeros((TX_MONITOR_H, TX_MONITOR_W, 3), dtype=np.uint8)
+            canvas = np.full((TX_MONITOR_H, TX_MONITOR_W, 3), 255, dtype=np.uint8)
             y0 = (TX_MONITOR_H - new_h) // 2
             x0 = (TX_MONITOR_W - new_w) // 2
             canvas[y0:y0+new_h, x0:x0+new_w] = scaled
@@ -229,6 +230,91 @@ def _frame_changed(prev: np.ndarray, curr: np.ndarray, threshold: float = 6.0) -
 # ══════════════════════════════════════════════════════════════════════════════
 # HILO CONSUMIDOR — decodifica frames de la FIFO
 # ══════════════════════════════════════════════════════════════════════════════
+def _debug_align(grid, image):
+    h, w = image.shape[:2]
+
+    # Reducir tamaño si es muy grande
+    if w > 1280:
+        scale = 1280 / w
+        image = cv2.resize(image, (1280, int(h * scale)))
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Threshold binario
+    _, binary = cv2.threshold(
+        gray,
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+
+    # Invertir SIN morphology close
+    closed = cv2.bitwise_not(binary)
+
+    contours, _ = cv2.findContours(
+        closed,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    img_area = image.shape[0] * image.shape[1]
+
+    contours = sorted(
+        contours,
+        key=cv2.contourArea,
+        reverse=True
+    )
+
+    print(f"[DEBUG ALIGN] frame={w}x{h}  img_area={img_area}  contornos={len(contours)}")
+
+    dbg = image.copy()
+
+    best_quad = None
+    best_area = 0
+
+    for i, cnt in enumerate(contours[:20]):
+
+        area = cv2.contourArea(cnt)
+        pct = area / img_area * 100
+
+        # Ignorar ruido pequeño
+        if pct < 1:
+            continue
+
+        # Ignorar regiones absurdamente grandes
+        if pct > 70:
+            continue
+
+        peri = cv2.arcLength(cnt, True)
+
+        approx = cv2.approxPolyDP(
+            cnt,
+            0.03 * peri,
+            True
+        )
+
+        print(f"  [{i}] area={area:.0f} ({pct:.1f}%)  vertices={len(approx)}")
+
+        # Dibujar todos los contornos válidos
+        cv2.drawContours(dbg, [approx], -1, (0, 255, 0), 2)
+
+        # Queremos cuadriláteros
+        if len(approx) != 4:
+            continue
+
+        if area > best_area:
+            best_area = area
+            best_quad = approx
+
+    # Dibujar el mejor cuadrilátero
+    if best_quad is not None:
+        cv2.drawContours(dbg, [best_quad], -1, (0, 0, 255), 4)
+
+    cv2.imshow("DEBUG CONTOURS", dbg)
+
+    # Continuar usando tu align original
+    return grid._align_grid(image)
 
 def consumer_loop(grid: Grid64Codec, fq: FifoFrameQueue,
                   running: threading.Event, decoded_q: queue.Queue) -> None:
@@ -243,14 +329,24 @@ def consumer_loop(grid: Grid64Codec, fq: FifoFrameQueue,
                    else ColorPalette(n_colors=current_n_colors))
 
         # Intentar alinear y decodificar
-        aligned = grid._align_grid(frame_img)
+        aligned = _debug_align(grid, frame_img)
+
         if aligned is None:
             with stats_lock:
                 stats.frames_error += 1
                 stats.last_error = "Grilla no detectada"
+
             decoded_q.put(("error", frame_img, "Grilla no detectada"))
             continue
 
+        payload_len, bpc = grid._read_format_info(aligned)
+
+        print(
+            f"[DEBUG] payload_len={payload_len}  "
+            f"bpc_leido={bpc}  "
+            f"codec_bpc={palette.bits_per_cell}  "
+            f"aligned_shape={aligned.shape}"
+        )
         try:
             cal_patch = grid._extract_cal_patch(aligned)
             palette.calibrate(cal_patch)

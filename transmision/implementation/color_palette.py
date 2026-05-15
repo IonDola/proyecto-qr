@@ -68,21 +68,45 @@ class ColorPalette(IColorCodec):
         """
         Ajusta la paleta usando el parche de referencia 4×4 capturado.
         ref_patch: array (4, 4, 3) BGR uint8 (formato OpenCV).
-        Los 16 colores están dispuestos en orden de izquierda a derecha,
-        de arriba a abajo en el parche.
+
+        Para paletas de color (n>2): los N colores están dispuestos en orden
+        de izquierda a derecha, de arriba a abajo en el parche.
+
+        Para paleta B/N (n=2): se promedian las 8 celdas más oscuras como
+        negro calibrado y las 8 más claras como blanco calibrado, lo que
+        es más robusto que tomar solo las primeras 2 celdas.
         """
         if ref_patch.shape != (4, 4, 3):
             raise ValueError(f"ref_patch debe ser (4,4,3), recibió {ref_patch.shape}")
 
-        observed: list[RGB] = []
-        for row in range(4):
-            for col in range(4):
-                b, g, r = ref_patch[row, col]   # OpenCV es BGR
-                observed.append((int(r), int(g), int(b)))
-
-        # Solo calibramos los N colores que usamos
-        for i in range(self._n_colors):
-            self._calibrated[i] = observed[i]
+        if self._n_colors == 2:
+            # Convertir todas las celdas a luminancia y ordenar
+            cells: list[tuple[float, RGB]] = []
+            for row in range(4):
+                for col in range(4):
+                    b, g, r = ref_patch[row, col]
+                    luma = 0.299 * r + 0.587 * g + 0.114 * b
+                    cells.append((luma, (int(r), int(g), int(b))))
+            cells.sort(key=lambda x: x[0])
+            # Promediar la mitad oscura -> negro, mitad clara -> blanco
+            dark  = cells[:8]
+            light = cells[8:]
+            def avg_rgb(group):
+                rs = sum(c[1][0] for c in group) // len(group)
+                gs = sum(c[1][1] for c in group) // len(group)
+                bs = sum(c[1][2] for c in group) // len(group)
+                return (rs, gs, bs)
+            self._calibrated[0] = avg_rgb(dark)   # nibble 0 = negro
+            self._calibrated[1] = avg_rgb(light)  # nibble 1 = blanco
+        else:
+            observed: list[RGB] = []
+            for row in range(4):
+                for col in range(4):
+                    b, g, r = ref_patch[row, col]   # OpenCV es BGR
+                    observed.append((int(r), int(g), int(b)))
+            # Solo calibramos los N colores que usamos
+            for i in range(self._n_colors):
+                self._calibrated[i] = observed[i]
 
     @property
     def bits_per_cell(self) -> int:
@@ -136,7 +160,11 @@ class ColorPalette(IColorCodec):
         """
         Genera n colores equidistantes en hue, con sat=BASE_SAT, val=BASE_VAL.
         Separación angular = 360/n grados.
+        Caso especial n=2: negro (0,0,0) y blanco (255,255,255) para
+        máximo contraste y compatibilidad con lectores estándar B/N.
         """
+        if n == 2:
+            return [(0, 0, 0), (255, 255, 255)]   # negro=0, blanco=1
         palette: list[RGB] = []
         for i in range(n):
             hue = i / n

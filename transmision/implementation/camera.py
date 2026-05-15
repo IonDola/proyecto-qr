@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 from common.exceptions import AdapterError
-from ..interfaces import ICameraInterface
+from transmision.interfaces import ICameraInterface
 
 
 class OpenCVCamera(ICameraInterface):
@@ -88,7 +88,7 @@ class OpenCVCamera(ICameraInterface):
 
     @property
     def resolution(self) -> tuple[int, int]:
-        return (self._width, self._height)
+        return self._width, self._height
 
     # ── contexto ──────────────────────────────────────────────────────────────
 

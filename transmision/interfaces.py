@@ -258,3 +258,18 @@ class IAdapterSelector(ABC):
     @abstractmethod
     def set_policy(self, policy: SelectionPolicy) -> None:
         """Cambia la política de selección en tiempo de ejecución."""
+
+# Frame
+class IFrameRenderer(ABC):
+
+    @abstractmethod
+    def show(self, frame: np.ndarray) -> None:
+        """
+        Muestra un frame visualmente.
+        """
+
+    @abstractmethod
+    def close(self) -> None:
+        """
+        Libera recursos gráficos.
+        """
